@@ -4,7 +4,7 @@ A **byte-exact, reassemblable** disassembly of the Commodore 64 music player for
 **The Last Ninja** (1987, System 3) — music by **Ben Daglish & Anthony Lees**,
 driven by the **WEMUSIC** engine (Ben Daglish / Tony Crowther).
 
-Assembling `src/lastninja.asm` with [ACME](https://sourceforge.net/projects/acme-crossass/)
+Assembling `src/lastninja.asm` with [Kick Assembler](http://theweb.dk/KickAssembler/)
 reproduces the C64 payload of the original `.sid` exactly; `tools/build_sid.py`
 adds the PSID header to recreate the whole file. CI fetches the reference from
 [HVSC](https://www.hvsc.c64.org/) and proves the rebuild is **identical to the
@@ -43,9 +43,11 @@ buildable source.
 
 ## Build & verify
 
-Requires `acme` and Python 3.
+Requires Java + [Kick Assembler](http://theweb.dk/KickAssembler/) and Python 3.
+Point `KICKASS_JAR` at `KickAss.jar` (or set `KICKASS` to a wrapper command).
 
 ```sh
+export KICKASS_JAR=/path/to/KickAss.jar
 make verify        # assemble, fetch reference, byte-compare
 make test          # same, via pytest
 ```
@@ -53,7 +55,7 @@ make test          # same, via pytest
 Individual steps:
 
 ```sh
-make bin           # acme -f plain -o build/lastninja.bin src/lastninja.asm
+make prg           # java -jar KickAss.jar src/lastninja.asm -o build/lastninja.prg
 make sid           # wrap with the PSID header  -> build/lastninja.sid
 make fetch         # download the reference     -> build/Last_Ninja.sid
 ```
@@ -71,9 +73,9 @@ python3 tools/regen.py build/Last_Ninja.sid
 
 ## CI
 
-`.github/workflows/ci.yml` installs ACME, fetches the reference from HVSC,
-assembles, and runs the round-trip test on every push/PR. Dependabot keeps the
-GitHub Actions and pip dependencies current.
+`.github/workflows/ci.yml` installs Java + Kick Assembler, fetches the reference
+from HVSC, assembles, and runs the round-trip test on every push/PR. Dependabot
+keeps the GitHub Actions and pip dependencies current.
 
 ## Credits & licensing
 

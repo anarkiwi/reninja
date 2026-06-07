@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Authoring tool: regenerate the byte-exact ACME source from a reference .sid.
+# Authoring tool: regenerate the byte-exact Kick Assembler source from a .sid.
 # Writes src/engine.asm + src/musicdata.asm. (Emits text only; assembles nothing.)
 #
 # Usage:  python3 tools/regen.py [path/to/Last_Ninja.sid]
@@ -159,24 +159,24 @@ CMT={
 0xBBD1:"advance to next SID voice register window",
 }
 
-# ---- emit engine.asm ----
+# ---- emit engine.asm (Kick Assembler syntax) ----
 L=[]
-L.append("; engine.asm  -  The Last Ninja / WEMUSIC player engine")
-L.append("; Resident at $B000 after the relocator copies it there.")
-L.append("; Assembled inside  !pseudopc $B000 { !source \"engine.asm\" }  by lastninja.asm,")
-L.append("; so labels carry their run-time ($Bxxx) addresses but bytes land at file $2063.")
-L.append("; Code is symbolic; embedded tables are emitted as !byte (byte-exact).")
+L.append("// engine.asm  -  The Last Ninja / WEMUSIC player engine")
+L.append("// Resident at $B000 after the relocator copies it there.")
+L.append('// Assembled inside  .pseudopc $B000 { .import source "engine.asm" }  by')
+L.append("// lastninja.asm, so labels carry their run-time ($Bxxx) addresses while the")
+L.append("// bytes land at file $2063. Code is symbolic; tables are .byte (byte-exact).")
 L.append("")
-L.append("; ---- equates (names resolve to their exact addresses; bytes unchanged) ----")
-for s,a in EQU: L.append("%-14s = $%04X"%(s,a))
+L.append("// ---- equates (names resolve to their exact addresses; bytes unchanged) ----")
+for s,a in EQU: L.append(".label %-14s = $%04X"%(s,a))
 L.append("")
 
 def emit_data(lo,hi,banner=None):
-    if banner: L.append("; %s"%banner)
+    if banner: L.append("// %s"%banner)
     a=lo
     while a<hi:
         chunk=mem[a:min(a+16,hi)]
-        L.append("    !byte "+", ".join("$%02X"%x for x in chunk)+"   ; $%04X"%a)
+        L.append("    .byte "+", ".join("$%02X"%x for x in chunk)+"   // $%04X"%a)
         a+=16
 
 pc=PB
@@ -193,13 +193,13 @@ while pc<PE:
         op=mem[pc]; mn,mode=T[op]; sz=SIZE[mode]
         if pc in NAMED or pc in refs:
             if pc in CMT and CMT[pc].startswith("---"):
-                L.append(""); L.append("; "+CMT[pc])
+                L.append(""); L.append("// "+CMT[pc])
             L.append("%s:"%lbl(pc))
         opr=operand(pc,mode)
         c=CMT.get(pc,"")
-        if c and not c.startswith("---"): c="   ; "+c
+        if c and not c.startswith("---"): c="   // "+c
         elif c.startswith("---"): c=""
-        L.append(("    %-4s %-14s"%(mn,opr)).rstrip()+c)
+        L.append(("    %-4s %-14s"%(mn.lower(),opr)).rstrip()+c)
         pc+=sz
     else:
         nxt=min([a for a in sorted(visited) if a>pc], default=PE)
@@ -213,28 +213,28 @@ while pc<PE:
             a=seg_end
         pc=nxt
 L.append("")
-L.append("; engine region must be exactly $B000..$BCE8")
-L.append('!if * != $BCE8 { !error "engine.asm size drift: ", *, " != $BCE8" }')
+L.append("// engine region must be exactly $B000..$BCE8")
+L.append('.errorif (* != $BCE8), "engine.asm size drift, expected $BCE8"')
 open(os.path.join(OUT,"engine.asm"),"w").write("\n".join(L)+"\n")
 
 # ---- emit musicdata.asm (file $2D4B..$AAA3) ----
 M=[]
-M.append("; musicdata.asm  -  music data blob, file $2D4B..$AAA3")
-M.append("; This is the song data + the other subtunes' relocatable blocks")
-M.append("; (the 11 subtune windows overlap; the relocator copies a $1000-byte")
-M.append("; window per subtune to $B000). Emitted byte-exact as data.")
-M.append("; Subtune source pointers (from the table at $204D):")
+M.append("// musicdata.asm  -  music data blob, file $2D4B..$AAA3")
+M.append("// Song data + the other subtunes' relocatable blocks (the 11 subtune windows")
+M.append("// overlap; the relocator copies a $1000-byte window per subtune to $B000).")
+M.append("// Emitted byte-exact as data.")
+M.append("// Subtune source pointers (from the table at $204D):")
 ptrs=[mem[0x204D+2*i]|mem[0x204E+2*i]<<8 for i in range(11)]
-M.append("; "+", ".join("s%d=$%04X"%(i,p) for i,p in enumerate(ptrs)))
+M.append("// "+", ".join("s%d=$%04X"%(i,p) for i,p in enumerate(ptrs)))
 M.append("")
 lo=0x2D4B
 a=lo
 while a<END:
     chunk=mem[a:min(a+16,END)]
-    M.append("    !byte "+", ".join("$%02X"%x for x in chunk)+"   ; $%04X"%a)
+    M.append("    .byte "+", ".join("$%02X"%x for x in chunk)+"   // $%04X"%a)
     a+=16
 M.append("")
-M.append('!if * != $AAA3 { !error "musicdata end drift: ", *, " != $AAA3" }')
+M.append('.errorif (* != $AAA3), "musicdata end drift, expected $AAA3"')
 open(os.path.join(OUT,"musicdata.asm"),"w").write("\n".join(M)+"\n")
 
 print("engine.asm code-insns:",len(visited),"region $%04X-$%04X"%(PB,PE))

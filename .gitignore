@@ -4,6 +4,13 @@ build/
 # The reference .sid is fetched at test time, never committed (HVSC copyright).
 *.sid
 
+# Kick Assembler distribution / side outputs
+*.jar
+*.zip
+*.prg
+*.sym
+*.vs
+
 # Python
 __pycache__/
 *.pyc

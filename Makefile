@@ -1,21 +1,24 @@
-ACME ?= acme
-BUILD := build
+# Kick Assembler is a Java jar. Point KICKASS_JAR at KickAss.jar, or override
+# the whole invocation with KICKASS=... (e.g. a wrapper script on PATH).
+KICKASS_JAR ?= KickAss.jar
+KICKASS     ?= java -jar $(KICKASS_JAR)
+BUILD       := build
 
-.PHONY: all sid bin fetch verify test clean
+.PHONY: all prg sid fetch verify test clean
 
 all: verify
 
 $(BUILD):
 	mkdir -p $(BUILD)
 
-bin: | $(BUILD)
-	$(ACME) -f plain -o $(BUILD)/lastninja.bin src/lastninja.asm
+prg: | $(BUILD)
+	$(KICKASS) src/lastninja.asm -o $(BUILD)/lastninja.prg
 
 fetch: | $(BUILD)
 	python3 tools/fetch_sid.py $(BUILD)/Last_Ninja.sid
 
-sid: bin
-	python3 tools/build_sid.py $(BUILD)/lastninja.bin $(BUILD)/lastninja.sid
+sid: prg
+	python3 tools/build_sid.py $(BUILD)/lastninja.prg $(BUILD)/lastninja.sid
 
 verify: sid fetch
 	python3 tools/verify.py $(BUILD)/lastninja.sid $(BUILD)/Last_Ninja.sid

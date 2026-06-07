@@ -9,19 +9,36 @@ on:
 permissions:
   contents: read
 
+env:
+  # Official Kick Assembler distribution (latest stable). The vendor does not
+  # publish stable version-pinned URLs; override KICKASS_URL here if you need a
+  # specific build. The archive contains KickAss.jar.
+  KICKASS_URL: "http://theweb.dk/KickAssembler/KickAssembler.zip"
+
 jobs:
   roundtrip:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install ACME assembler
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y acme
-          acme --version
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
 
-      - uses: actions/setup-python@v5
+      - name: Install Kick Assembler
+        run: |
+          curl -fL -o kickass.zip "$KICKASS_URL"
+          mkdir -p "$HOME/kickass"
+          unzip -o kickass.zip -d "$HOME/kickass" >/dev/null
+          JAR="$(find "$HOME/kickass" -name 'KickAss.jar' | head -1)"
+          test -n "$JAR" || { echo "KickAss.jar not found in archive"; exit 1; }
+          echo "KICKASS_JAR=$JAR" >> "$GITHUB_ENV"
+          java -jar "$JAR" -version || true
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
@@ -37,7 +54,7 @@ jobs:
         with:
           name: build
           path: |
-            build/lastninja.bin
+            build/lastninja.prg
             build/lastninja.sid
           if-no-files-found: ignore
           retention-days: 7
