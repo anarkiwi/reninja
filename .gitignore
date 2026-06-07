@@ -1,0 +1,11 @@
+# Build artifacts
+build/
+
+# The reference .sid is fetched at test time, never committed (HVSC copyright).
+*.sid
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/

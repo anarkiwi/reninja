@@ -1,0 +1,403 @@
+; =============================================================================
+;  THE LAST NINJA  -  C64 music player routine
+;  Music: Ben Daglish & Anthony Lees  (1987, System 3)
+;  Driver: the "WEMUSIC" engine (Ben Daglish / Tony Crowther)
+;
+;  Reverse-engineered from MUSICIANS/D/Daglish_Ben/Last_Ninja.sid (HVSC),
+;  a PSID v2 file. Disassembled with a custom 6502 recursive-descent tracer.
+;  Annotations are mine; the opcodes/addresses are exact.
+;
+;  Assemble target: informational / ACME-style. Addresses are absolute as they
+;  appear in RAM after relocation, so this is a documented disassembly rather
+;  than a drop-in reassembly source.
+;
+;  ---------------------------------------------------------------------------
+;  HIGH-LEVEL STRUCTURE
+;  ---------------------------------------------------------------------------
+;  PSID header:  load=$0000 (=> real load $2000), init=$2003, play=$2000,
+;                11 subtunes, startsong=3.
+;
+;  The file loads at $2000 but the ACTUAL player engine runs at $B000. The
+;  code at $2000 is a small RELOCATOR + BANKING stub:
+;
+;    * init ($2003): takes the subtune number in A, looks it up in a pointer
+;      table at $204D, copies that subtune's 16-page ($1000 byte) block up to
+;      $B000, then calls the relocated player-init at $B000.
+;    * play ($2000 -> $2039): banks RAM in, calls relocated play at $B003.
+;
+;  Each of the 11 subtunes is a self-contained ~4 KB block (engine code is
+;  shared at the front, music data differs); the relocator picks one and drops
+;  it at $B000. Subtune source pointers (from $204D):
+;     0:$2063 1:$2DAB 2:$3AA3 3:$4523 4:$5423 5:$6203
+;     6:$6E73 7:$7A6B 8:$8663 9:$92C3 10:$9E83
+; =============================================================================
+
+
+; =============================================================================
+;  PART 1 - RELOCATOR / BANKING STUB  (lives at $2000)
+; =============================================================================
+
+play_stub:                      ; play entry ($2000)
+        2000: JMP  banked_play   ; -> $2039
+
+init_stub:                       ; init entry ($2003), A = subtune number
+        2003: LDX #$35
+        2005: STX $01            ; $01=$35: BASIC+KERNAL ROM OUT, I/O IN
+                                 ;   -> RAM is visible under $A000-$BFFF so the
+                                 ;      engine can live at $B000.
+        2007: ASL                ; A = subtune*2  (2-byte table entries)
+        2008: TAX
+        2009: LDA $204D,X        ; fetch source pointer for this subtune ...
+        200C: STA $FB            ;   $FB/$FC = source pointer
+        200E: LDA $204E,X
+        2011: STA $FC
+        2013: LDA #$00
+        2015: STA $FD            ; $FD/$FE = dest pointer = $B000
+        2017: LDA #$B0
+        2019: STA $FE
+        201B: LDX #$10           ; copy 16 pages = $1000 bytes
+copy_page:
+        201D: LDY #$00
+copy_byte:
+        201F: LDA ($FB),Y        ; standard 256-byte page copy
+        2021: STA ($FD),Y
+        2023: INY
+        2024: BNE copy_byte
+        2026: INC $FC            ; next source page
+        2028: INC $FE            ; next dest page
+        202A: DEX
+        202B: BNE copy_page      ; engine now resident at $B000-$BFFF
+
+call_init:
+        202D: LDX #$28           ; X/Y = $B728 (data ptr param for engine init)
+        202F: LDY #$B7
+        2031: JSR $B000          ; -> relocated player_init
+        2034: LDA #$37
+        2036: STA $01            ; restore normal banking ($37 = all ROM in)
+        2038: RTS
+
+banked_play:                     ; play, called every frame (IRQ)
+        2039: LDA #$35
+        203B: STA $01            ; bank RAM/I/O in
+        203D: JSR $B003          ; -> relocated player_play (one tick)
+        2040: LDA $B700          ; engine "is initialised" flag
+        2043: BNE done           ;   already running -> just restore + exit
+        2045: JMP call_init      ;   not yet -> run init path
+done:
+        2048: LDA #$37
+        204A: STA $01            ; restore banking
+        204C: RTS
+
+;       $204D: subtune source-pointer table (22 bytes, 11 LE words)
+
+
+; =============================================================================
+;  PART 2 - THE WEMUSIC ENGINE  (resident at $B000 after relocation)
+; =============================================================================
+;
+;  Entry vectors (the front of every relocated block):
+        B000: JMP  player_init   ; -> $B666
+        B003: JMP  player_play   ; -> $B6B6
+;
+;  --- DATA LIVING INSIDE THE BLOCK (used by the engine) ---
+;  $B006..$B1xx : per-voice ARPEGGIO / wavetable streams (packed note+len bytes)
+;  $B1CE        : instrument table base (the ($FC),Y "current instrument" data)
+;  $B3FC..$B4F7 : per-pattern / sequence pointer tables (LE word lists)
+;  $B500..$B55E : NOTE FREQUENCY table, HIGH bytes  (indexed by note 0..95)
+;  $B55F..$B5B5 : NOTE FREQUENCY table, LOW bytes
+;  $B5C6..      : misc small lookup tables (durations, vibrato deltas)
+;
+;  --- ZERO PAGE ---
+;  $F0/$F1,$F2/$F3,$F4/$F5 : per-voice "note/sequence" read pointer (3 voices)
+;  $F6/$F7,$F8/$F9,$FA/$FB : per-voice loop-restart pointer (for pattern repeat)
+;  $FC/$FD                 : scratch pointer to CURRENT instrument data block
+;  $FF                     : engine-initialised flag (0 until init done)
+;
+;  --- PER-VOICE STATE ARRAYS (indexed by voice X = 0..2) ---
+;  $B5EE,X / $B5F4,X : working note frequency  hi / lo  (voice carrier)
+;  $B5F1,X / $B5F7,X : working frequency       hi / lo  (2nd osc / portamento)
+;  $B5FA,X / $B600,X : working PULSE WIDTH     hi / lo
+;  $B5FD,X / $B603,X : working PULSE WIDTH     hi / lo  (sweep target)
+;  $B606,X          : waveform / control (gate) byte  -> SID CTRL
+;  $B609,X          : alternate waveform byte
+;  $B60C,X          : phase/toggle flag for the two-osc detune
+;  $B60F,X          : detune toggle countdown
+;  $B612,X          : tempo tick counter (reloads 6)
+;  $B615,X          : 5-bit effect/arp sub-counter (AND #$1F)
+;  $B618,X..$B651,X : delay/length counters for each modulator
+;                     (vibrato up/down, PW sweep up/down, etc.) in add/sub pairs
+;  $B654,X          : per-voice detune/finetune added to freq-lo at output
+;  $B5E8,X / $B5EB,X: ATTACK/DECAY and SUSTAIN/RELEASE  -> SID AD / SR
+;  $B5D9            : current voice index (0..2)
+;  $B5DA            : current voice index * 2
+;  $B5E2 / $B5E3    : last 16-bit "note command" word fetched from the stream
+; =============================================================================
+
+
+; ---------------------------------------------------------------------------
+;  player_init  ($B666)   - called once per subtune
+; ---------------------------------------------------------------------------
+player_init:
+        B666: NOP x6             ; (padding / patch space)
+        B66C: LDX #$00
+init_ptrs:
+        B66E: LDA $B65A,X        ; seed the per-voice read pointers ($F0..$F5)
+        B671: STA $F0,X          ;   and the loop-restart pointers ($F6..$FB)
+        B673: LDA $B660,X        ;   from the block's pointer-seed tables
+        B676: STA $F6,X
+        B678: INX
+        B679: CPX #$06
+        B67B: BNE init_ptrs
+        B67D: LDA #$01
+        B67F: STA $B615          ; reset the 3 voices' effect counters
+        B682: STA $B616
+        B685: STA $B617
+        B688: LDA #$08
+        B68A: STA $D418          ; SID master volume = 8 (filter off, vol 8)
+        B68D: NOP x34            ; (patch space)
+        B6AF: LDA #$FF
+        B6B1: STA $FF            ; mark engine initialised
+        B6B3: RTS
+
+
+; ---------------------------------------------------------------------------
+;  player_play  ($B6B6)   - called once per frame (50 Hz)
+; ---------------------------------------------------------------------------
+player_play:
+        B6B6: NOP x5
+        B6BB: LDA $FF            ; initialised yet?
+        B6BD: BNE pp_run
+        B6BF: JMP LBBFC          ;   no -> housekeeping / silence path
+pp_run:
+        B6C2: LDX #$00           ; loop over the 3 voices, X = voice
+voice_loop:                      ; ($B6C4)
+        B6C4: STX $B5D9          ; save voice index
+        B6C7: TXA
+        B6C8: ASL
+        B6C9: STA $B5DA          ; voice*2
+        B6CC: TAX
+        B6CD: LDA $B5DC,X        ; load this voice's CURRENT INSTRUMENT pointer
+        B6D0: STA $FC            ;   into $FC/$FD  -> all ($FC),Y reads below
+        B6D2: LDA $B5DD,X        ;   pull per-step parameters from instrument data
+        B6D5: STA $FD
+        B6D7: LDX $B5D9
+        B6DA: DEC $B612,X        ; tempo counter--
+        B6DD: BNE no_tick
+        B6DF: LDA #$06           ;   reload tempo (6 frames / step)
+        B6E1: STA $B612,X
+        B6E4: DEC $B615,X        ;   advance 5-bit effect counter
+        B6E7: PHP
+        B6E8: LDA $B615,X
+        B6EB: AND #$1F
+        B6ED: STA $B615,X
+        B6F0: PLP
+        B6F1: BNE no_tick
+        B6F3: JSR fetch_note     ;   counter wrapped -> read next note command
+no_tick:
+;       ---- VOICE PITCH MODULATION (vibrato / portamento on carrier osc) ----
+;       The next blocks are 4 near-identical add/subtract sweep engines. Each
+;       runs a delay counter; while it is non-zero it adds (or subtracts) a
+;       per-instrument delta from a 16-bit working value, then flips direction.
+;       Pattern repeats for: freq osc1, freq osc2, pulse width, pw-2.
+        B6F6: LDA $B618,X        ; modulator-1 delay active?
+        B6F9: BEQ m1_run
+        B6FB: DEC $B618,X
+        B6FE: JMP after_m1
+m1_run: B701: LDA $B61E,X
+        ...                      ; (see freq sweep sub at $B713)
+        B70D: JSR freq_sweep_1   ; $B713
+after_m1:
+        B710: JMP LB77C
+
+; freq_sweep_1 ($B713): 16-bit add/sub of vibrato delta to $B5EE/$B5F4 (osc1),
+;   direction flag $B630,X, up-count $B624,X / down-count $B62A,X, deltas read
+;   from instrument data at ($FC),Y offsets $0A/$0B (add) and $0C/$0D (sub).
+freq_sweep_1:
+        B713: LDA $B630,X        ; direction flag (0=up phase,$FF=down phase)
+        B716: BNE fs1_down
+        B718: LDA $B624,X        ; up-counter
+        B71B: BNE fs1_add
+fs1_reload_up:                   ; ($B71D) add delta to 16-bit working freq
+        B71D: LDA $B5F4,X
+        B720: LDY #$0B
+        B722: CLC
+        B723: ADC ($FC),Y        ; + instrument vibrato delta (lo)
+        B725: STA $B5F4,X
+        B728: LDY #$0A
+        B72A: LDA #$00
+        B72C: ADC $B5EE,X
+        B72F: ADC ($FC),Y        ; + delta (hi) with carry
+        B731: STA $B5EE,X
+        B734: RTS
+fs1_add:B735: DEC $B624,X        ; still adding: count down phase length ...
+        B738: BNE fs1_reload_up
+        B73A: LDA $B630,X        ; phase done -> flip to down phase
+        B73D: EOR #$FF
+        B73F: STA $B630,X
+        B742: LDY #$08
+        B744: LDA ($FC),Y        ; reload up-phase length from instrument
+        B746: STA $B624,X
+        B749: RTS
+fs1_down:                        ; ($B74A) symmetric subtract branch
+        B74A: ... SBC ($FC),Y at $0C/$0D, length at offset $09, ctr $B62A,X
+;       (identical structure; subtracts delta from $B5EE/$B5F4)
+
+;  The same add/sub sweep template is repeated three more times for the other
+;  modulation targets:
+;     freq_sweep_2 ($B799): osc2 freq  -> $B5F1/$B5F7, offsets $12/$13/$14/$15
+;     pw_sweep_1   ($B829): pulse width-> $B5F1/$B5F7? actually $B5F7/$B5F1 pair
+;     pw_sweep_2   ($B8AF): pulse width-> $B5FD/$B603,  offsets $25/$26/$27/$28
+;  Each is dispatched through the same "delay counter / direction flag" gate
+;  ($B77C, $B802, $B892) as freq_sweep_1.
+
+
+; ---------------------------------------------------------------------------
+;  fetch_note  ($B937)  - pull the next 16-bit command from the voice stream
+; ---------------------------------------------------------------------------
+;  Reads 2 bytes from the voice's read pointer ($F0,X). If the word is $0000
+;  it is an END marker: reload the read pointer from the loop-restart pointer
+;  ($F6,X) and read again -> this gives per-voice pattern looping.
+;  Otherwise the word is decoded: top 5 bits select instrument/effect (->arp
+;  counter $B615,X) and the low 6 bits are the NOTE number ($00-$3F; $3F = a
+;  special "tie/hold" with no retrigger).
+fetch_note:
+        B937: LDX $B5DA
+        B93A: JSR read_stream    ; A = next stream byte, ptr++ ($B949)
+        B93D: STA $B5E2          ;   low byte of command word
+        B940: JSR read_stream
+        B943: STA $B5E3          ;   high byte
+        B946: JMP decode_cmd     ; -> $B952
+read_stream:                     ; ($B949) LDA ($F0,X); INC 16-bit ptr ($F0,X/$F1,X)
+        B949: LDA ($F0,X)
+        B94B: INC $F0,X
+        B94D: BNE rs_done
+        B94F: INC $F1,X
+rs_done:B951: RTS
+decode_cmd:                      ; ($B952)
+        B952: LDA $B5E2
+        B955: ORA $B5E3
+        B958: BNE not_end        ;   word != 0 -> a real note/command
+        B95A: LDX $B5DA          ;   word == 0 -> END: reload ptr from loop ptr
+        B95D: JSR read_loopptr   ; ($B96A) reads from ($F6,X), ptr++
+        B960: STA $F0,X
+        B962: JSR read_loopptr
+        B965: STA $F1,X
+        B967: JMP fetch_note     ;   and fetch the first note of the repeat
+read_loopptr:                    ; ($B96A) parallel reader for the restart ptr
+        B96A: LDA ($F6,X)
+        B96C: INC $F6,X
+        B96E: BNE rl_done
+        B970: INC $F7,X
+rl_done:B972: RTS
+not_end:                         ; ($B973)  --- decode note + instrument ---
+        B973: LDX $B5DA
+        B976: LDA $B5E3
+        B979: AND #$F8           ; high bits -> instrument / arp index
+        B97B: LSR / LSR / LSR
+        B97E: LDX $B5D9
+        B981: STA $B615,X        ;   store as effect/arp counter
+        B984: LDX $B5DA
+        B987: LDA $B5E2
+        B98A: AND #$3F           ; low 6 bits = note number
+        B98C: CMP #$3F
+        B98E: BNE play_note      ;   $3F = "hold/tie": keep sounding, update only
+        ...                      ;   waveform+pulse from instrument (no retrigger)
+play_note:                       ; ($B9A6) NOTE-ON: build new instrument pointer
+;       Selects this note's instrument data block. The block at $B1CE is a list
+;       of instrument records; the high bits of the command pick one, and the
+;       routine at $B9A9-$BA12 does a bit-weighted address build (shift-add of
+;       a $2F-byte stride) to land $FC/$FD on the chosen instrument record,
+;       which it then stores back into $B5DC,X/$B5DD,X for subsequent frames.
+;
+;       It then loads the instrument's starting parameters via ($FC),Y:
+;         off $2B/$2C -> initial PW          ($B5FA/$B600)
+;         off $2D/$2E -> initial PW-2        ($B5FD/$B603)
+;         off $05     -> octave offset (note += 12*n) for osc1
+;         off $18     -> octave offset for osc2
+;         off $06/$19,$07/$1A,$08/$1B,$09/$1C,$0E/$21,$0F/$22,$10/$23,$11/$24
+;                     -> the eight modulator delay/length counters
+;         off $00/$01 -> ATTACK-DECAY / SUSTAIN-RELEASE ($B5E8/$B5EB) -> SID
+;         off $03     -> detune toggle period ($B60F)
+;         off $16/$29 -> waveform bytes ($B606/$B609) -> SID CTRL (gate)
+;       NOTE -> FREQUENCY conversion uses the dual tables:
+;         freq_hi = $B500,note   freq_lo = $B55F,note
+;       (computed at $BA56 and $BA89 for the two oscillators).
+
+
+; ---------------------------------------------------------------------------
+;  SID OUTPUT  ($BB5C)  - write all three voices to the SID chip
+; ---------------------------------------------------------------------------
+;  Y indexes the SID voice register window in steps of 7 ($D400, $D407, $D40E);
+;  X indexes the per-voice working state. Writes freq, pulse width, control,
+;  and (voice-3 only) toggles the filter/volume register.
+sid_output:
+        BB5C: LDA #$00
+        BB5E: TAY
+        BB5F: TAX
+out_voice:                       ; ($BB60)
+        BB60: LDA $B5E8,X
+        BB63: STA $D405,Y        ; ATTACK/DECAY
+        BB66: LDA $B5EB,X
+        BB69: STA $D406,Y        ; SUSTAIN/RELEASE
+        BB6C: LDA $B60C,X        ; which oscillator set is "live" this frame?
+        BB6F: BEQ out_osc2       ;   (two-oscillator detune toggle)
+;       --- oscillator 1 path ---
+        BB71: LDA $B5F4,X
+        BB74: CLC
+        BB75: ADC $B654,X        ; + per-voice finetune
+        BB78: STA $D400,Y        ; FREQ LO
+        BB7B: LDA #$00
+        BB7D: ADC $B5EE,X
+        BB80: STA $D401,Y        ; FREQ HI
+        BB83: LDA $B5FA,X
+        BB86: STA $D403,Y        ; PW HI
+        BB89: LDA $B600,X
+        BB8C: STA $D402,Y        ; PW LO
+        BB8F: LDA $B606,X
+        BB92: STA $D404,Y        ; CONTROL (waveform + gate)
+        BB95: JMP next_voice
+out_osc2:                        ; ($BB98) second oscillator / detuned copy
+        BB98: LDA $B5F7,X
+        BB9B: CLC
+        BB9C: ADC $B654,X
+        BB9F: STA $D400,Y        ; FREQ LO
+        BBA2: LDA #$00
+        BBA4: ADC $B5F1,X
+        BBA7: STA $D401,Y        ; FREQ HI
+        BBAA: CPX #$02           ; voice 3 only: drive the filter / volume nibble
+        BBAC: BNE out_osc2_pw
+        BBAE: LDA $B657,X
+        BBB1: AND #$01
+        BBB3: BNE LBC02
+        BBB5: LDA #$F0
+        BBB7: STA $D417          ; RESONANCE/filter routing
+        BBBA: LDA #$08
+        BBBC: STA $D418          ; VOLUME (8) + filter mode
+out_osc2_pw:
+        BBBF: LDA $B5FD,X
+        BBC2: STA $D403,Y        ; PW HI
+        BBC5: LDA $B603,X
+        BBC8: STA $D402,Y        ; PW LO
+        BBCB: LDA $B609,X
+        BBCE: STA $D404,Y        ; CONTROL
+next_voice:                      ; ($BBD1)
+        BBD1: INX
+        BBD2: TYA
+        BBD3: CLC
+        BBD4: ADC #$07           ; next SID voice register window
+        BBD6: TAY
+        BBD7: CPY #$15           ; done all 3 voices? (0,7,14 -> 21)
+        BBD9: BNE out_voice
+        ; ... housekeeping at $BBDB checks loop-restart pointer ($FA cmp #$EE)
+        ;     to detect end-of-tune and re-trigger effect counters, then RTS.
+
+; ---------------------------------------------------------------------------
+;  Helper effect subroutines invoked from the modulation dispatch:
+;     sub_BC2D, sub_BC48, sub_BCAA  - one-shot waveform/gate retrigger and
+;     pulse-width preset helpers (read instrument bytes, poke $B606/$B609,
+;     reset gate). Called when a modulator's "trigger" counter expires.
+; ---------------------------------------------------------------------------
+;
+;  END OF DOCUMENTED DISASSEMBLY.
+;  Full raw labelled listing (all 851 lines incl. data tables): last_ninja_player.asm
+; =============================================================================

@@ -1,0 +1,43 @@
+name: roundtrip
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  roundtrip:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install ACME assembler
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y acme
+          acme --version
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install test deps
+        run: pip install -r requirements-dev.txt
+
+      - name: Assemble + round-trip verify (pytest)
+        run: python -m pytest -v
+
+      - name: Upload rebuilt artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build
+          path: |
+            build/lastninja.bin
+            build/lastninja.sid
+          if-no-files-found: ignore
+          retention-days: 7
